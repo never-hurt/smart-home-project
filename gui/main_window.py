@@ -179,6 +179,13 @@ class MainWindow:
         self.btn_temp_up.config(state=tk.DISABLED)
         self.btn_temp_down.config(state=tk.DISABLED)
 
+        # ----- 系统组 -----
+        sys_card = self._make_control_card(inner, "⚙️  系统")
+        sys_card.pack(side=tk.LEFT, padx=18)
+
+        BeautifulButton(sys_card, text="⏻ 退出程序",
+                        command=self._on_exit, variant="danger").pack(side=tk.LEFT, padx=4)
+
     def _make_control_card(self, parent, title):
         card = tk.Frame(parent, bg=THEME["bg_surface"],
                          highlightbackground=THEME["border"],
@@ -207,6 +214,14 @@ class MainWindow:
 
     def on_temp_down(self):
         self._execute_gui_cmd("温度调低")
+
+    # ---------------------- 退出程序 ----------------------
+    def _on_exit(self):
+        """点击退出按钮：停止监听 → 销毁窗口"""
+        if self.voice_listener:
+            self.voice_listener.stop_listening()
+            self.voice_listener = None
+        self.root.destroy()
 
     # ---------------------- 语音控制 ----------------------
     def start_voice(self):
@@ -258,6 +273,14 @@ class MainWindow:
             self.log_panel.write_log("INFO", f"🎤 {message}")
         elif status_type == "recognizing":
             self.log_panel.write_log("INFO", f"🔍 {message}")
+        elif status_type == "confirming":
+            # 语音确认阶段 — 在日志中询问是否继续
+            self.log_panel.write_log("INFO", f"❓ {message}")
+        elif status_type == "confirmed":
+            if "🛑" in message or "停止" in message:
+                self.log_panel.write_log("WARN", message)
+            else:
+                self.log_panel.write_log("INFO", message)
         elif status_type == "matched":
             if "❌" in message:
                 self.log_panel.write_log("WARN", message)
@@ -265,26 +288,30 @@ class MainWindow:
                 self.log_panel.write_log("INFO", message)
         elif status_type == "error":
             self.log_panel.write_log("ERROR", message)
+        else:
+            # raw_text, waiting_voice, calibrated 等也显示
+            self.log_panel.write_log("INFO", message)
 
     def ask_continue(self):
-        result = messagebox.askyesno(
-            "语音识别完成",
-            "🎤 本次语音识别已完成\n\n"
-            "是否继续进行语音识别？\n\n"
-            "点击「是」— 继续监听下一条指令\n"
-            "点击「否」— 退出语音识别模式"
-        )
-        if result:
-            self.start_voice()
-        else:
+        """语音确认完成后的回调：自动继续监听，无需弹窗"""
+        if not self.voice_listener or not self.voice_listener.running:
+            # 用户说了取消，清理状态
             self.stop_voice()
             self.log_panel.write_log("INFO", "已退出语音识别模式")
+        else:
+            # 继续监听（VoiceListener 内部已完成语音确认）
+            self.start_voice()
 
     def on_voice_recognized(self, raw_text: str, matched_cmd: str):
         if raw_text:
             self.log_panel.write_log("INFO", f"🎤 语音原文：{raw_text}")
         if "[识别失败]" in matched_cmd or "[监听异常]" in matched_cmd:
             self.log_panel.write_log("WARN", f"识别结果：{matched_cmd}")
+            return
+        # 停止监听指令：直接停止，不走设备指令
+        if matched_cmd == "停止监听":
+            self.log_panel.write_log("INFO", "🛑 语音指令：停止监听")
+            self.stop_voice()
             return
         self.log_panel.write_log("INFO", f"🎯 匹配指令：{matched_cmd}")
         self._execute_gui_cmd(matched_cmd)

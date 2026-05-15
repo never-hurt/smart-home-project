@@ -53,6 +53,13 @@ class VoiceListener:
             "温度调低": [
                 "温度调低", "调低温度", "降温", "温度低一点",
                 "温度减一点", "温度下降", "调低一度", "温度减"
+            ],
+            "停止监听": [
+                "停止监听", "停止", "结束监听", "关闭监听",
+                "退出监听", "不再监听", "取消监听", "别听了",
+                "停下", "结束", "退出", "不听了", "停了",
+                "停下监听", "不听了退出", "关掉监听", "停掉",
+                "不听", "停止语音", "关闭语音", "结束语音"
             ]
         }
 
@@ -191,9 +198,17 @@ class VoiceListener:
             # 同时传递原始识别文字和匹配后的指令
             if self.running:
                 self.root.after(0, lambda: self.on_recognize_callback(full_text, matched_cmd))
-                # 通知监听完成，由调用方决定是否继续
-                if self.on_listen_complete:
-                    self.root.after(800, self.on_listen_complete)
+
+                # ====== 阶段6：语音确认是否继续 ======
+                # 停止监听 → 不确认、不调度回调，由 on_voice_recognized 负责退出
+                # 识别失败 → 直接继续监听
+                if matched_cmd == "停止监听":
+                    pass  # on_voice_recognized 会调用 stop_voice
+                elif "[识别失败]" in matched_cmd:
+                    if self.on_listen_complete:
+                        self.root.after(800, self.on_listen_complete)
+                else:
+                    self._voice_confirm_continue()
 
         except Exception as e:
             print(f"\n❌ 识别异常：{str(e)}")
@@ -210,6 +225,101 @@ class VoiceListener:
             except Exception:
                 pass
 
+    # ═══════════════════════════════════════════════════════
+    #  语音确认 — 说"继续"或"取消"代替手动弹窗
+    # ═══════════════════════════════════════════════════════
+    CONFIRM_CONTINUE_KEYWORDS = [
+        "继续监听", "继续", "接着监听", "接着", "再听", "再来一遍",
+        "是的", "好的", "好", "可以", "行", "嗯", "要"
+    ]
+    CONFIRM_STOP_KEYWORDS = [
+        "取消监听", "取消", "停止监听", "停止", "不听了", "结束",
+        "不要", "不用", "不了", "算了", "退出", "不再监听", "别听了"
+    ]
+
+    def _match_confirm(self, text: str) -> str | None:
+        """匹配确认语音 → 返回 "继续" / "取消" / None（未识别）"""
+        if not text:
+            return None
+        clean = text.replace(" ", "")
+        text_pinyin = self._text_to_pinyin(clean)
+
+        # 原文字包含匹配
+        for kw in self.CONFIRM_CONTINUE_KEYWORDS:
+            if kw.replace(" ", "") in clean:
+                return "继续"
+        for kw in self.CONFIRM_STOP_KEYWORDS:
+            if kw.replace(" ", "") in clean:
+                return "取消"
+
+        # 拼音容错匹配（如"继xu"、"ji xu"等谐音）
+        for kw in self.CONFIRM_CONTINUE_KEYWORDS:
+            kw_pinyin = self._text_to_pinyin(kw)
+            if distance(text_pinyin, kw_pinyin) <= 2:
+                return "继续"
+        for kw in self.CONFIRM_STOP_KEYWORDS:
+            kw_pinyin = self._text_to_pinyin(kw)
+            if distance(text_pinyin, kw_pinyin) <= 2:
+                return "取消"
+
+        return None
+
+    def _voice_confirm_continue(self):
+        """语音确认阶段：录音 3 秒 → 识别"继续"或"取消" → 自动决定"""
+        if not self.running:
+            return
+
+        self._notify_status("confirming", "❓ 是否继续？（说「继续」或「取消」）")
+        print("\n❓ 请说「继续监听」或「取消监听」...")
+
+        # 简短录音确认（比指令录音短）
+        confirm_frames = self.audio_capture.record_voice(
+            max_duration=3.0,
+            silence_duration=1.0,
+            on_level=lambda rms, thr: None
+        )
+
+        if not self.running or len(confirm_frames) < int(self.audio_capture.RATE / self.audio_capture.CHUNK * 0.2):
+            # 没检测到有效语音 → 默认继续
+            self._notify_status("confirmed", "⏰ 未听清，默认继续监听")
+            print("⏰ 未听清回答，默认继续监听")
+            if self.running and self.on_listen_complete:
+                self.root.after(500, self.on_listen_complete)
+            return
+
+        # 识别确认语音
+        self.recognizer.Reset()
+        confirm_text = ""
+        for frame in confirm_frames:
+            if self.recognizer.AcceptWaveform(frame):
+                result = json.loads(self.recognizer.Result())
+                confirm_text = result.get("text", "").strip()
+
+        if not confirm_text:
+            partial = json.loads(self.recognizer.PartialResult())
+            confirm_text = partial.get("partial", "").strip()
+
+        print(f"🔊 确认语音：【{confirm_text}】")
+        action = self._match_confirm(confirm_text)
+
+        if action == "取消":
+            self._notify_status("confirmed", "🛑 语音确认：停止监听")
+            print("🛑 语音确认：停止监听")
+            self.running = False
+            self.root.after(0, lambda: self.on_recognize_callback("", "[语音确认] 用户说取消"))
+            if self.on_listen_complete:
+                self.root.after(500, self.on_listen_complete)
+        else:
+            # 包括"继续"和 None（未识别）都默认继续
+            if action == "继续":
+                self._notify_status("confirmed", "✅ 语音确认：继续监听")
+                print("✅ 语音确认：继续监听")
+            else:
+                self._notify_status("confirmed", f"⚠️ 未识别确认词（「{confirm_text}」），默认继续")
+                print(f"⚠️ 未识别确认词，默认继续")
+            if self.running and self.on_listen_complete:
+                self.root.after(500, self.on_listen_complete)
+
     def _multi_level_match(self, text):
         if not text:
             return "[识别失败] 未识别到任何语音"
@@ -217,6 +327,7 @@ class VoiceListener:
         clean_text = text.replace(" ", "").replace("\n", "").replace("\t", "")
         print(f"🔧 处理后的识别文字：【{clean_text}】")
 
+        # --- 第1层：原文字精确/包含匹配 ---
         for standard_cmd, keywords in self.COMMAND_MAP.items():
             for kw in keywords:
                 clean_kw = kw.replace(" ", "")
