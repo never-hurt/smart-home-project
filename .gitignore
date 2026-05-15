@@ -6,6 +6,8 @@ __pycache__/
 dist/
 build/
 *.egg
+*.bak
+*.bak2
 
 # Virtual Environment
 .venv/
@@ -17,6 +19,16 @@ env/
 .vscode/
 *.swp
 *.swo
+
+# 录音临时文件
+录音_*.wav
+
+# 模型文件（太大）
+gesture/hand_landmarker.task
+vosk-model-small-cn-0.22/
+
+# 第三方包残留
+wget-*.dist-info/
 
 # OS
 Thumbs.db

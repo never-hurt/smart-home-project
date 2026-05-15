@@ -1,5 +1,6 @@
 # control/cmd_parser.py
-from typing import Dict, Tuple
+# control/cmd_parser.py
+from typing import Tuple
 from device.device_manager import DeviceStateMachine
 
 

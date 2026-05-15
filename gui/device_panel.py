@@ -20,8 +20,8 @@ class DevicePanel:
         self.root = root
 
         # 外层框架，暗色背景
-        self.frame = tk.Frame(parent, height=340, bg=THEME["bg_deep"])
-        self.frame.pack(fill=tk.X, padx=12, pady=(6, 0))
+        self.frame = tk.Frame(parent, width=780, height=340, bg=THEME["bg_deep"])
+        self.frame.pack(side=tk.LEFT, fill=tk.BOTH)
         self.frame.pack_propagate(False)
 
         # 面板标题

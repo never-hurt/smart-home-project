@@ -5,6 +5,9 @@ from gui.log_panel import LogPanel
 from device.device_manager import DeviceStateMachine
 from control.cmd_parser import CmdParser
 from control.voice_listener import VoiceListener
+from gesture.gesture_listener import GestureListener
+import cv2
+from PIL import Image, ImageTk
 
 # ═══════════════════════════════════════════════════════════════
 #  设计系统 — 现代智能家居暗色主题
@@ -36,6 +39,7 @@ FONT_SMALL  = ("微软雅黑", 9)
 class BeautifulButton(tk.Button):
     """保留原有构造函数签名 + 全部回调行为，仅升级视觉效果"""
     def __init__(self, parent, text, command=None, **kwargs):
+        print(f"DEBUG: BeautifulButton.__init__ 开始创建按钮: text={text}")
         self._variant = kwargs.pop("variant", "default")  # default / accent / danger / warm
         self.default_bg = kwargs.pop("bg", None)
         self.default_fg = kwargs.pop("fg", None)
@@ -74,6 +78,7 @@ class BeautifulButton(tk.Button):
         )
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
+        print(f"DEBUG: BeautifulButton.__init__ 完成: {self}")
 
     def _on_enter(self, event):
         if str(self["state"]) != "disabled":
@@ -88,21 +93,32 @@ class MainWindow:
     def __init__(self, root):
         self.root = root
         self.root.title("🏠 智能家居语音交互控制系统")
-        self.root.geometry("950x780")
+        self.root.geometry("1300x950")
         self.root.resizable(False, False)
         self.root.configure(bg=THEME["bg_deep"])
 
         self.state_machine = DeviceStateMachine()
         self.cmd_parser = CmdParser()
 
+        # 初始化成员变量，避免 AttributeError
+        self.voice_listener = None
+        self._voice_btn = None
+        self.gesture_listener = None
+        self._gesture_btn = None
+        self._cam_img_ref = None  # 保持 PhotoImage 引用防 GC
+        self._gesture_hint_labels = []  # 手势说明文字标签
+
         self._create_header()
-        self.device_panel = DevicePanel(self.root, self.root)
+
+        # 中间区域：设备面板 + 摄像头画面 左右并排
+        middle_row = tk.Frame(self.root, bg=THEME["bg_deep"])
+        middle_row.pack(fill=tk.X, padx=12, pady=(6, 0))
+
+        self.device_panel = DevicePanel(middle_row, self.root)
+        self._create_camera_panel(middle_row)
+
         self._create_control_bar()
         self.log_panel = LogPanel(self.root, self.root)
-
-        self.voice_listener = None
-        # 追踪监听按钮引用用于状态切换
-        self._voice_btn = None
 
     # ---------- 顶部标题栏 ----------
     def _create_header(self):
@@ -156,6 +172,14 @@ class MainWindow:
                                            command=self.start_voice, variant="accent")
         self._voice_btn.pack(side=tk.LEFT, padx=4)
 
+        # ----- 手势组 -----
+        gesture_card = self._make_control_card(inner, "✋  手势控制")
+        gesture_card.pack(side=tk.LEFT, padx=18)
+
+        self._gesture_btn = BeautifulButton(gesture_card, text="📷 打开摄像头",
+                                             command=self.toggle_gesture, variant="accent")
+        self._gesture_btn.pack(side=tk.LEFT, padx=4)
+
         # ----- 空调组 -----
         air_card = self._make_control_card(inner, "❄️  空调控制")
         air_card.pack(side=tk.LEFT, padx=18)
@@ -194,6 +218,58 @@ class MainWindow:
                  bg=THEME["bg_surface"], fg=THEME["text_secondary"]).pack(anchor=tk.W, pady=(0, 4))
         return card
 
+    # ---------- 摄像头预览面板 ----------
+    def _create_camera_panel(self, parent):
+        """摄像头实时预览区域 + 手势识别结果"""
+        cam_frame = tk.Frame(parent, bg=THEME["bg_card"],
+                              highlightbackground=THEME["border"],
+                              highlightthickness=1)
+        cam_frame.pack(side=tk.LEFT, padx=6, fill=tk.BOTH, expand=True)
+
+        # 标题
+        tk.Label(cam_frame, text="📷 手势识别", font=FONT_HEADER,
+                 bg=THEME["bg_card"], fg=THEME["text_primary"]).pack(pady=(8, 4))
+
+        # 画布（用于显示 OpenCV 帧，含骨骼绘制）
+        self.cam_canvas = tk.Canvas(cam_frame, width=380, height=340,
+                                     bg=THEME["bg_deep"], highlightthickness=0)
+        self.cam_canvas.pack(padx=10, pady=4)
+
+        # 状态文字
+        self.cam_status_label = tk.Label(cam_frame, text="摄像头未开启",
+                                          font=FONT_SMALL, bg=THEME["bg_card"],
+                                          fg=THEME["text_secondary"])
+        self.cam_status_label.pack(pady=(0, 2))
+
+        # 手势识别结果高亮显示
+        self.gesture_result_label = tk.Label(cam_frame, text="",
+                                              font=("微软雅黑", 12, "bold"),
+                                              bg=THEME["bg_card"],
+                                              fg=THEME["accent"])
+        self.gesture_result_label.pack(pady=(0, 4))
+
+        # ── 手势说明面板 ──
+        hint_frame = tk.Frame(cam_frame, bg=THEME["bg_card"])
+        hint_frame.pack(pady=(0, 8), padx=10, fill=tk.X)
+
+        tk.Label(hint_frame, text="📋 手势说明", font=FONT_SMALL,
+                 bg=THEME["bg_card"], fg=THEME["text_secondary"]).pack(anchor=tk.W)
+
+        hints = [
+            ("🖐 五指张开  →  打开灯光", THEME["accent_warm"]),
+            ("✊ 握拳      →  关闭灯光", THEME["text_secondary"]),
+            ("☝ 伸出1指   →  打开空调", THEME["accent"]),
+            ("✌ 伸出2指   →  关闭空调", THEME["text_secondary"]),
+            ("👌 伸出3指   →  温度调高", THEME["accent_warm"]),
+            ("🖖 伸出4指   →  温度调低", THEME["accent"]),
+        ]
+        self._gesture_hint_labels = []
+        for text, color in hints:
+            lbl = tk.Label(hint_frame, text=text, font=("微软雅黑", 9),
+                           bg=THEME["bg_card"], fg=color, anchor=tk.W)
+            lbl.pack(anchor=tk.W, padx=16)
+            self._gesture_hint_labels.append(lbl)
+
     # ═══════════════════════════════════════════════════════
     #  所有回调函数 — 功能 100% 不变
     # ═══════════════════════════════════════════════════════
@@ -217,14 +293,28 @@ class MainWindow:
 
     # ---------------------- 退出程序 ----------------------
     def _on_exit(self):
-        """点击退出按钮：停止监听 → 销毁窗口"""
+        """点击退出按钮：停止所有监听 → 销毁窗口"""
         if self.voice_listener:
             self.voice_listener.stop_listening()
             self.voice_listener = None
+        if self.gesture_listener:
+            self.gesture_listener.stop()
+            self.gesture_listener = None
         self.root.destroy()
 
     # ---------------------- 语音控制 ----------------------
     def start_voice(self):
+        """开始语音监听（按钮切换：开始↔停止）"""
+        print("DEBUG: start_voice 被调用")
+        # 如果已在监听中 → 执行停止
+        if self.voice_listener and self.voice_listener.running:
+            self.stop_voice()
+            return
+        # 否则启动监听
+        self._do_start_voice()
+
+    def _do_start_voice(self):
+        """实际启动语音监听"""
         self.voice_listener = VoiceListener(
             root=self.root,
             on_recognize_callback=self.on_voice_recognized,
@@ -293,18 +383,24 @@ class MainWindow:
             self.log_panel.write_log("INFO", message)
 
     def ask_continue(self):
-        """语音确认完成后的回调：自动继续监听，无需弹窗"""
-        if not self.voice_listener or not self.voice_listener.running:
-            # 用户说了取消，清理状态
-            self.stop_voice()
-            self.log_panel.write_log("INFO", "已退出语音识别模式")
+        """监听完成后的回调：继续→重启监听，否则→停止"""
+        if self.voice_listener and self.voice_listener.running:
+            self.log_panel.write_log("INFO", "✅ 继续监听")
+            self.voice_listener.recognizer.Reset()
+            self.voice_listener.start()
         else:
-            # 继续监听（VoiceListener 内部已完成语音确认）
-            self.start_voice()
+            self.log_panel.write_log("INFO", "🛑 停止监听，已退出语音识别模式")
+            self.stop_voice()
+
+    # ---------------------- 语音识别回调 ----------------------
 
     def on_voice_recognized(self, raw_text: str, matched_cmd: str):
         if raw_text:
             self.log_panel.write_log("INFO", f"🎤 语音原文：{raw_text}")
+        # 语音确认阶段的内部标记，不执行设备指令
+        if "[语音确认]" in matched_cmd:
+            self.log_panel.write_log("WARN" if "取消" in matched_cmd else "INFO", matched_cmd)
+            return
         if "[识别失败]" in matched_cmd or "[监听异常]" in matched_cmd:
             self.log_panel.write_log("WARN", f"识别结果：{matched_cmd}")
             return
@@ -348,6 +444,131 @@ class MainWindow:
             else:
                 self.btn_temp_up.config(state=tk.DISABLED)
                 self.btn_temp_down.config(state=tk.DISABLED)
+
+    # ═══════════════════════════════════════════════════════
+    #  手势控制 — 摄像头 + 手势识别 + 骨骼绘制
+    # ═══════════════════════════════════════════════════════
+
+    # 手势 → 指令映射表（纯手指数量分类，区分度极大）
+    GESTURE_CMD_MAP = {
+        "🖐 五指张开":  "打开灯光",
+        "✊ 握拳":      "关闭灯光",
+        "☝ 伸出1指":   "打开空调",
+        "✌ 伸出2指":   "关闭空调",
+        "👌 伸出3指":   "温度调高",
+        "🖖 伸出4指":   "温度调低",
+    }
+
+    def toggle_gesture(self):
+        """切换手势识别开关"""
+        if self.gesture_listener and self.gesture_listener.running:
+            self._stop_gesture()
+        else:
+            self._start_gesture()
+
+    def _start_gesture(self):
+        """启动手势识别（摄像头 + MediaPipe + 骨骼绘制）"""
+        try:
+            self.gesture_listener = GestureListener(
+                on_gesture=self._on_gesture_recognized,
+                on_frame=self._on_camera_frame,
+                on_error=self._on_camera_error
+            )
+            self.gesture_listener.start()
+            self._set_gesture_btn_state(previewing=True)
+            self.cam_status_label.config(text="✋ 手势识别运行中...", fg=THEME["accent"])
+            self.log_panel.write_log("INFO", "✋ 手势识别已启动，请将手放入摄像头画面")
+        except Exception as e:
+            self.log_panel.write_log("ERROR", f"手势识别启动失败：{e}")
+            messagebox.showerror("摄像头错误", f"无法打开摄像头：{e}")
+
+    def _stop_gesture(self):
+        """停止手势识别（先断引用再 stop，防残留帧）"""
+        listener = self.gesture_listener
+        self.gesture_listener = None  # ← 先断引用，让 on_frame 回调立即跳过
+        if listener:
+            listener.stop()
+        # 清空画布
+        self.cam_canvas.delete("all")
+        self.cam_canvas.create_text(190, 170, text="摄像头未开启",
+                                     fill=THEME["text_secondary"],
+                                     font=FONT_SMALL)
+        self.gesture_result_label.config(text="")
+        self._set_gesture_btn_state(previewing=False)
+        self.cam_status_label.config(text="摄像头未开启", fg=THEME["text_secondary"])
+        self.log_panel.write_log("INFO", "✋ 手势识别已关闭")
+
+    def _on_gesture_recognized(self, gesture_name: str):
+        """手势识别结果回调 → 映射为设备指令 → 执行"""
+        cmd = self.GESTURE_CMD_MAP.get(gesture_name)
+        if cmd is None:
+            return  # 未在映射表中的手势忽略
+
+        def _update():
+            self.gesture_result_label.config(text=f"✋ {gesture_name}  →  {cmd}")
+            self.cam_status_label.config(
+                text=f"✋ 识别: {gesture_name}  →  {cmd}", fg=THEME["accent_warm"])
+        self.root.after(0, _update)
+
+        self.log_panel.write_log("INFO", f"✋ 手势: {gesture_name}  →  指令: {cmd}")
+        self.root.after(0, lambda: self._execute_gui_cmd(cmd))
+
+    def _on_camera_frame(self, frame_bgr):
+        """接收已绘制骨骼的帧 → 转为 PhotoImage → 画在 Canvas 上"""
+        # 如果已关闭，忽略残留帧
+        if self.gesture_listener is None:
+            return
+        try:
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+            img = img.resize((380, 340), Image.LANCZOS)
+            self._cam_img_ref = ImageTk.PhotoImage(img)
+
+            def _draw():
+                if self.gesture_listener is None:
+                    return
+                self.cam_canvas.delete("all")
+                self.cam_canvas.create_image(0, 0, anchor=tk.NW,
+                                              image=self._cam_img_ref)
+            self.root.after(0, _draw)
+        except Exception:
+            pass  # 窗口关闭时忽略
+
+    def _on_camera_error(self, msg):
+        """摄像头异常回调"""
+        if self.gesture_listener is None:
+            return
+        self.root.after(0, lambda: self._handle_camera_error(msg))
+
+    def _handle_camera_error(self, msg):
+        if self.gesture_listener is None:
+            return
+        self.log_panel.write_log("ERROR", f"📷 {msg}")
+        messagebox.showerror("摄像头错误", msg)
+        self._stop_gesture()
+
+    def _set_gesture_btn_state(self, previewing: bool):
+        """更新手势按钮的文字和配色"""
+        if self._gesture_btn is None:
+            return
+        if previewing:
+            self._gesture_btn._variant = "danger"
+            self._gesture_btn.default_bg = "#f85149"
+            self._gesture_btn.default_fg = "#ffffff"
+            self._gesture_btn.hover_bg = "#ff6b6b"
+            self._gesture_btn.active_bg = "#f85149"
+            self._gesture_btn.border_color = "#f85149"
+            self._gesture_btn.config(text="⏹ 关闭摄像头", bg="#f85149", fg="#ffffff",
+                                      highlightbackground="#f85149")
+        else:
+            self._gesture_btn._variant = "accent"
+            self._gesture_btn.default_bg = "#00d4aa"
+            self._gesture_btn.default_fg = "#0d1117"
+            self._gesture_btn.hover_bg = "#00e6bf"
+            self._gesture_btn.active_bg = "#00d4aa"
+            self._gesture_btn.border_color = "#00d4aa"
+            self._gesture_btn.config(text="📷 打开摄像头", bg="#00d4aa", fg="#0d1117",
+                                      highlightbackground="#00d4aa")
 
 
 if __name__ == "__main__":
